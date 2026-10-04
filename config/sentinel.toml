@@ -1,0 +1,19 @@
+[telemetry]
+interval_seconds = 5
+
+[process]
+enabled = true
+include_command_line = true
+
+[network]
+enabled = true
+include_udp = true
+
+[filesystem]
+enabled = true
+paths = ["/etc", "/usr/local/bin", "/tmp"]
+recursive = false
+
+[logging]
+level = "info"
+json = false
