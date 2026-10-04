@@ -58,11 +58,77 @@ fn flags_public_sensitive_listening_port_as_medium() {
         local_address: "0.0.0.0".into(),
         local_port: 6379,
         inode: Some(123),
+        process: None,
     };
 
     let event = event_for_socket(&socket);
     assert_eq!(event.severity, Severity::Medium);
     assert_eq!(event.kind, EventKind::ListeningSocket);
+}
+
+#[test]
+fn flags_public_root_listener_as_high() {
+    let socket = SocketInfo {
+        protocol: "tcp".into(),
+        local_address: "0.0.0.0".into(),
+        local_port: 4444,
+        inode: Some(53124),
+        process: Some(ProcessInfo {
+            pid: 1842,
+            name: Some("listener".into()),
+            exe: Some("/usr/local/bin/listener".into()),
+            cmdline: Some("/usr/local/bin/listener --port 4444".into()),
+            uid: Some(0),
+        }),
+    };
+
+    let event = event_for_socket(&socket);
+
+    assert_eq!(event.severity, Severity::High);
+    assert_eq!(event.details["pid"], 1842);
+    assert_eq!(event.details["process_uid"], 0);
+    assert_eq!(
+        event.details["process_cmdline"],
+        "/usr/local/bin/listener --port 4444"
+    );
+}
+
+#[test]
+fn flags_temporary_path_listener_as_high() {
+    let socket = SocketInfo {
+        protocol: "tcp".into(),
+        local_address: "127.0.0.1".into(),
+        local_port: 9001,
+        inode: Some(6001),
+        process: Some(ProcessInfo {
+            pid: 99,
+            name: Some("payload".into()),
+            exe: Some("/tmp/payload".into()),
+            cmdline: None,
+            uid: Some(1000),
+        }),
+    };
+
+    assert_eq!(event_for_socket(&socket).severity, Severity::High);
+}
+
+#[test]
+fn flags_deleted_executable_listener_as_high() {
+    let socket = SocketInfo {
+        protocol: "tcp".into(),
+        local_address: "127.0.0.1".into(),
+        local_port: 9002,
+        inode: Some(6002),
+        process: Some(ProcessInfo {
+            pid: 100,
+            name: Some("stale".into()),
+            exe: Some("/usr/bin/stale (deleted)".into()),
+            cmdline: None,
+            uid: Some(1000),
+        }),
+    };
+
+    assert_eq!(event_for_socket(&socket).severity, Severity::High);
 }
 
 #[test]

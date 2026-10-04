@@ -1,12 +1,36 @@
+use crate::process::ProcessInfo;
 use anyhow::Result;
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
+    net::Ipv6Addr,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 pub struct SocketInfo {
     pub protocol: String,
     pub local_address: String,
     pub local_port: u16,
     pub inode: Option<u64>,
+    pub process: Option<ProcessInfo>,
+}
+
+impl PartialEq for SocketInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.protocol == other.protocol
+            && self.local_address == other.local_address
+            && self.local_port == other.local_port
+            && self.inode == other.inode
+    }
+}
+
+impl Hash for SocketInfo {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.protocol.hash(state);
+        self.local_address.hash(state);
+        self.local_port.hash(state);
+        self.inode.hash(state);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -32,106 +56,279 @@ impl SocketState {
 }
 
 #[cfg(target_os = "linux")]
-pub fn collect_listening_sockets(include_udp: bool) -> Result<Vec<SocketInfo>> {
-    linux::collect_listening_sockets(include_udp)
+pub fn collect_listening_sockets(
+    include_udp: bool,
+    include_command_line: bool,
+) -> Result<Vec<SocketInfo>> {
+    linux::collect_listening_sockets(include_udp, include_command_line)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn collect_listening_sockets(_include_udp: bool) -> Result<Vec<SocketInfo>> {
+pub fn collect_listening_sockets(
+    _include_udp: bool,
+    _include_command_line: bool,
+) -> Result<Vec<SocketInfo>> {
     Ok(Vec::new())
+}
+
+pub fn parse_proc_net_sockets(
+    raw: &str,
+    protocol: &str,
+    tcp_only_listen: bool,
+    owners: &HashMap<u64, ProcessInfo>,
+) -> Vec<SocketInfo> {
+    let mut sockets = Vec::new();
+
+    for line in raw.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 10 {
+            continue;
+        }
+
+        let state = fields[3];
+        if tcp_only_listen && state != "0A" {
+            continue;
+        }
+
+        if let Some((address, port)) = parse_address(fields[1], protocol.ends_with('6')) {
+            let inode = fields[9].parse::<u64>().ok();
+            let process = inode.and_then(|inode| owners.get(&inode).cloned());
+            sockets.push(SocketInfo {
+                protocol: protocol.to_string(),
+                local_address: address,
+                local_port: port,
+                inode,
+                process,
+            });
+        }
+    }
+
+    sockets
+}
+
+pub fn socket_inode_from_link_target(value: &str) -> Option<u64> {
+    let inode = value
+        .strip_prefix("socket:[")
+        .and_then(|value| value.strip_suffix(']'))?;
+    inode.parse().ok()
+}
+
+fn parse_address(value: &str, ipv6: bool) -> Option<(String, u16)> {
+    let (address_hex, port_hex) = value.split_once(':')?;
+    let port = u16::from_str_radix(port_hex, 16).ok()?;
+
+    if ipv6 {
+        parse_ipv6(address_hex).map(|address| (address, port))
+    } else {
+        parse_ipv4(address_hex).map(|address| (address, port))
+    }
+}
+
+fn parse_ipv4(value: &str) -> Option<String> {
+    if value.len() != 8 {
+        return None;
+    }
+
+    let raw = u32::from_str_radix(value, 16).ok()?;
+    let bytes = raw.to_le_bytes();
+    Some(format!(
+        "{}.{}.{}.{}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    ))
+}
+
+fn parse_ipv6(value: &str) -> Option<String> {
+    if value.len() != 32 {
+        return None;
+    }
+
+    let mut bytes = [0_u8; 16];
+    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).ok()?;
+        bytes[index] = u8::from_str_radix(hex, 16).ok()?;
+    }
+
+    for chunk in bytes.chunks_exact_mut(4) {
+        chunk.reverse();
+    }
+
+    Some(Ipv6Addr::from(bytes).to_string())
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::SocketInfo;
+    use super::{parse_proc_net_sockets, socket_inode_from_link_target, SocketInfo};
+    use crate::process::read_process_from_proc_dir;
     use anyhow::{Context, Result};
-    use std::{fs, net::Ipv6Addr};
+    use std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+    };
 
-    pub fn collect_listening_sockets(include_udp: bool) -> Result<Vec<SocketInfo>> {
+    pub fn collect_listening_sockets(
+        include_udp: bool,
+        include_command_line: bool,
+    ) -> Result<Vec<SocketInfo>> {
+        collect_listening_sockets_from_proc(Path::new("/proc"), include_udp, include_command_line)
+    }
+
+    fn collect_listening_sockets_from_proc(
+        proc_root: &Path,
+        include_udp: bool,
+        include_command_line: bool,
+    ) -> Result<Vec<SocketInfo>> {
+        let owners = collect_socket_owners(proc_root, include_command_line)?;
         let mut sockets = Vec::new();
-        collect_from_file("/proc/net/tcp", "tcp", true, &mut sockets)?;
-        collect_from_file("/proc/net/tcp6", "tcp6", true, &mut sockets)?;
+        collect_from_file(
+            proc_root.join("net/tcp"),
+            "tcp",
+            true,
+            &owners,
+            &mut sockets,
+        )?;
+        collect_from_file(
+            proc_root.join("net/tcp6"),
+            "tcp6",
+            true,
+            &owners,
+            &mut sockets,
+        )?;
 
         if include_udp {
-            collect_from_file("/proc/net/udp", "udp", false, &mut sockets)?;
-            collect_from_file("/proc/net/udp6", "udp6", false, &mut sockets)?;
+            collect_from_file(
+                proc_root.join("net/udp"),
+                "udp",
+                false,
+                &owners,
+                &mut sockets,
+            )?;
+            collect_from_file(
+                proc_root.join("net/udp6"),
+                "udp6",
+                false,
+                &owners,
+                &mut sockets,
+            )?;
         }
 
         Ok(sockets)
     }
 
-    fn collect_from_file(
-        path: &str,
-        protocol: &str,
-        tcp_only_listen: bool,
-        sockets: &mut Vec<SocketInfo>,
-    ) -> Result<()> {
-        let raw = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+    fn collect_socket_owners(
+        proc_root: &Path,
+        include_command_line: bool,
+    ) -> Result<HashMap<u64, crate::process::ProcessInfo>> {
+        let mut owners = HashMap::new();
 
-        for line in raw.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 10 {
+        for entry in fs::read_dir(proc_root)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
                 continue;
-            }
+            };
 
-            let state = fields[3];
-            if tcp_only_listen && state != "0A" {
+            let proc_dir = entry.path();
+            let process = read_process_from_proc_dir(&proc_dir, pid, include_command_line);
+            let fd_dir = proc_dir.join("fd");
+            let Ok(fd_entries) = fs::read_dir(fd_dir) else {
                 continue;
-            }
+            };
 
-            if let Some((address, port)) = parse_address(fields[1], protocol.ends_with('6')) {
-                let inode = fields[9].parse::<u64>().ok();
-                sockets.push(SocketInfo {
-                    protocol: protocol.to_string(),
-                    local_address: address,
-                    local_port: port,
-                    inode,
-                });
+            for fd_entry in fd_entries.flatten() {
+                let Ok(target) = fs::read_link(fd_entry.path()) else {
+                    continue;
+                };
+
+                if let Some(inode) = socket_inode_from_path(target) {
+                    owners.entry(inode).or_insert_with(|| process.clone());
+                }
             }
         }
+
+        Ok(owners)
+    }
+
+    fn socket_inode_from_path(path: PathBuf) -> Option<u64> {
+        socket_inode_from_link_target(&path.to_string_lossy())
+    }
+
+    fn collect_from_file(
+        path: PathBuf,
+        protocol: &str,
+        tcp_only_listen: bool,
+        owners: &HashMap<u64, crate::process::ProcessInfo>,
+        sockets: &mut Vec<SocketInfo>,
+    ) -> Result<()> {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        sockets.extend(parse_proc_net_sockets(
+            &raw,
+            protocol,
+            tcp_only_listen,
+            owners,
+        ));
 
         Ok(())
     }
+}
 
-    fn parse_address(value: &str, ipv6: bool) -> Option<(String, u16)> {
-        let (address_hex, port_hex) = value.split_once(':')?;
-        let port = u16::from_str_radix(port_hex, 16).ok()?;
+#[cfg(test)]
+mod tests {
+    use super::{parse_proc_net_sockets, socket_inode_from_link_target};
+    use crate::process::ProcessInfo;
+    use std::collections::HashMap;
 
-        if ipv6 {
-            parse_ipv6(address_hex).map(|address| (address, port))
-        } else {
-            parse_ipv4(address_hex).map(|address| (address, port))
-        }
+    #[test]
+    fn extracts_socket_inode_from_fd_target() {
+        assert_eq!(socket_inode_from_link_target("socket:[53124]"), Some(53124));
+        assert_eq!(socket_inode_from_link_target("/tmp/file"), None);
     }
 
-    fn parse_ipv4(value: &str) -> Option<String> {
-        if value.len() != 8 {
-            return None;
-        }
+    #[test]
+    fn parses_proc_net_tcp_and_attaches_owner() {
+        let mut owners = HashMap::new();
+        owners.insert(
+            53124,
+            ProcessInfo {
+                pid: 1842,
+                name: Some("sshd".into()),
+                exe: Some("/usr/sbin/sshd".into()),
+                cmdline: Some("/usr/sbin/sshd -D".into()),
+                uid: Some(0),
+            },
+        );
 
-        let raw = u32::from_str_radix(value, 16).ok()?;
-        let bytes = raw.to_le_bytes();
-        Some(format!(
-            "{}.{}.{}.{}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ))
+        let raw = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 53124 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:1F90 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 99999 1 0000000000000000 100 0 0 10 0
+";
+
+        let sockets = parse_proc_net_sockets(&raw, "tcp", true, &owners);
+
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(sockets[0].local_address, "0.0.0.0");
+        assert_eq!(sockets[0].local_port, 22);
+        assert_eq!(sockets[0].inode, Some(53124));
+        assert_eq!(
+            sockets[0].process.as_ref().map(|process| process.pid),
+            Some(1842)
+        );
     }
 
-    fn parse_ipv6(value: &str) -> Option<String> {
-        if value.len() != 32 {
-            return None;
-        }
+    #[test]
+    fn parses_udp_without_listen_state_filter() {
+        let owners = HashMap::new();
+        let raw = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   102        0 2222 2 0000000000000000 0
+";
 
-        let mut bytes = [0_u8; 16];
-        for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
-            let hex = std::str::from_utf8(chunk).ok()?;
-            bytes[index] = u8::from_str_radix(hex, 16).ok()?;
-        }
+        let sockets = parse_proc_net_sockets(&raw, "udp", false, &owners);
 
-        for chunk in bytes.chunks_exact_mut(4) {
-            chunk.reverse();
-        }
-
-        Some(Ipv6Addr::from(bytes).to_string())
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(sockets[0].local_address, "127.0.0.1");
+        assert_eq!(sockets[0].local_port, 53);
     }
 }

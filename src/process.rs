@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: Option<String>,
@@ -34,7 +34,7 @@ impl ProcessState {
 
 #[cfg(target_os = "linux")]
 pub fn collect_processes(include_command_line: bool) -> Result<Vec<ProcessInfo>> {
-    linux::collect_processes(include_command_line)
+    collect_processes_from_proc_root(std::path::Path::new("/proc"), include_command_line)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -43,41 +43,76 @@ pub fn collect_processes(_include_command_line: bool) -> Result<Vec<ProcessInfo>
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn collect_processes_from_proc_root(
+    proc_root: &std::path::Path,
+    include_command_line: bool,
+) -> Result<Vec<ProcessInfo>> {
+    linux::collect_processes_from_proc_root(proc_root, include_command_line)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_process_from_proc_dir(
+    proc_dir: &std::path::Path,
+    pid: u32,
+    include_command_line: bool,
+) -> ProcessInfo {
+    linux::read_process_from_proc_dir(proc_dir, pid, include_command_line)
+}
+
+#[cfg(target_os = "linux")]
 mod linux {
     use super::ProcessInfo;
     use anyhow::Result;
-    use std::{fs, os::unix::fs::MetadataExt, path::PathBuf};
+    use std::{
+        fs,
+        os::unix::fs::MetadataExt,
+        path::{Path, PathBuf},
+    };
 
-    pub fn collect_processes(include_command_line: bool) -> Result<Vec<ProcessInfo>> {
+    pub fn collect_processes_from_proc_root(
+        proc_root: &Path,
+        include_command_line: bool,
+    ) -> Result<Vec<ProcessInfo>> {
         let mut processes = Vec::new();
 
-        for entry in fs::read_dir("/proc")? {
+        for entry in fs::read_dir(proc_root)? {
             let entry = entry?;
             let file_name = entry.file_name();
             let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
                 continue;
             };
 
-            let proc_dir = entry.path();
-            let name = read_trimmed(proc_dir.join("comm"));
-            let exe = fs::read_link(proc_dir.join("exe"))
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned());
-            let uid = fs::metadata(&proc_dir).ok().map(|metadata| metadata.uid());
-            let cmdline = include_command_line
-                .then(|| read_cmdline(proc_dir.join("cmdline")))
-                .flatten();
-
-            processes.push(ProcessInfo {
+            processes.push(read_process_from_proc_dir(
+                &entry.path(),
                 pid,
-                name,
-                exe,
-                cmdline,
-                uid,
-            });
+                include_command_line,
+            ));
         }
 
         Ok(processes)
+    }
+
+    pub fn read_process_from_proc_dir(
+        proc_dir: &Path,
+        pid: u32,
+        include_command_line: bool,
+    ) -> ProcessInfo {
+        let name = read_trimmed(proc_dir.join("comm"));
+        let exe = fs::read_link(proc_dir.join("exe"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        let uid = fs::metadata(proc_dir).ok().map(|metadata| metadata.uid());
+        let cmdline = include_command_line
+            .then(|| read_cmdline(proc_dir.join("cmdline")))
+            .flatten();
+
+        ProcessInfo {
+            pid,
+            name,
+            exe,
+            cmdline,
+            uid,
+        }
     }
 
     fn read_trimmed(path: PathBuf) -> Option<String> {

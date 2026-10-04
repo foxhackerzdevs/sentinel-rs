@@ -1,10 +1,10 @@
 # sentinel-rs
 
-`sentinel-rs` is a small, read-only Linux host telemetry monitor written in Rust. Phase 1 focuses on collecting useful local security signals and emitting structured JSON events without taking response actions.
+`sentinel-rs` is a small, read-only Linux host telemetry monitor written in Rust. It focuses on collecting useful local security signals and emitting structured JSON events without taking response actions.
 
 It does not kill processes, block network connections, quarantine files, change permissions, or modify watched paths.
 
-## Phase 1 Features
+## Features
 
 - Process telemetry from `/proc`
   - New process observation during continuous monitoring
@@ -14,6 +14,9 @@ It does not kill processes, block network connections, quarantine files, change 
   - TCP listening sockets
   - Optional UDP socket telemetry
   - Severity hint for public binds on commonly sensitive service ports
+  - Process-to-socket attribution by matching `/proc/<pid>/fd` socket inodes to `/proc/net/tcp` and `/proc/net/tcp6`
+  - Owner context on attributed socket events: PID, process name, executable path, UID, and optional command line
+  - High-severity hints for public root listeners, temporary-path executables that listen, and deleted executables that listen
 - Filesystem monitoring
   - Watches configured paths with the Rust `notify` crate
   - Emits create, modify, remove, and other filesystem events
@@ -78,7 +81,7 @@ cargo run -- --config config/sentinel.toml run
 Each event is printed as a single JSON line:
 
 ```json
-{"timestamp":"2026-10-04T14:02:11.123Z","kind":"listening_socket","severity":"medium","source":"network","message":"tcp listening on 0.0.0.0:6379","details":{"local_address":"0.0.0.0","local_port":6379,"protocol":"tcp","inode":123}}
+{"timestamp":"2026-10-04T14:02:11.123Z","kind":"listening_socket","severity":"high","source":"network","message":"tcp listening on 0.0.0.0:4444 owned by pid 1842 (payload)","details":{"inode":53124,"local_address":"0.0.0.0","local_port":4444,"pid":1842,"process_cmdline":"/tmp/payload --listen 4444","process_exe":"/tmp/payload","process_name":"payload","process_uid":0,"protocol":"tcp"}}
 ```
 
 ## Configuration
@@ -112,6 +115,7 @@ json = false
 Most telemetry works as an unprivileged user, but visibility depends on host policy:
 
 - Some process executable paths or command lines may be hidden by `/proc` permissions.
+- Process-to-socket attribution depends on permission to inspect `/proc/<pid>/fd` symlinks. Socket events are still emitted when owner context is unavailable.
 - Watching protected filesystem paths may fail without appropriate read/search permissions.
 - Running as root increases visibility, but is not required for the first pass.
 
@@ -122,7 +126,7 @@ If a configured filesystem watch path cannot be opened, `sentinel-rs` logs that 
 - This is telemetry, not an EDR or prevention engine.
 - Detections are intentionally simple hints, not definitive maliciousness labels.
 - Process monitoring is polling-based, so very short-lived processes may be missed.
-- Network process attribution is not implemented yet; Phase 1 reports sockets, not owning processes.
+- Network process attribution is inode-based and reflects what `/proc` exposes at collection time. Very short-lived processes or restricted `/proc` entries may be unattributed.
 - Filesystem event behavior can vary by kernel, filesystem, and watcher backend.
 - Linux `/proc` parsing is intentionally minimal and may be expanded in later phases.
 
@@ -150,7 +154,6 @@ sentinel-rs/
 
 ## Next Phase Ideas
 
-- Process-to-socket attribution via socket inode mapping
 - Baseline and allowlist configuration
 - Persisted event logs with rotation
 - More robust detection rules

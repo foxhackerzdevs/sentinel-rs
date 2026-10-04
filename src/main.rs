@@ -151,7 +151,10 @@ fn collect_once(config: &SentinelConfig, stateful: bool) -> Result<Vec<SecurityE
         }
 
         if config.network.enabled {
-            for socket in collect_listening_sockets(config.network.include_udp)? {
+            for socket in collect_listening_sockets(
+                config.network.include_udp,
+                config.process.include_command_line,
+            )? {
                 events.push(event_for_socket(&socket));
             }
         }
@@ -175,7 +178,10 @@ fn collect_stateful(
     }
 
     if config.network.enabled {
-        let sockets = collect_listening_sockets(config.network.include_udp)?;
+        let sockets = collect_listening_sockets(
+            config.network.include_udp,
+            config.process.include_command_line,
+        )?;
         for socket in socket_state.new_sockets(&sockets) {
             events.push(event_for_socket(&socket));
         }
