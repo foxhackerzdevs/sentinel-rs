@@ -23,6 +23,10 @@ pub enum EventKind {
     FileRemoved,
     FileOther,
     MonitorStatus,
+    FirstSeenProcess,
+    FirstSeenListener,
+    ListenerOwnerChanged,
+    BaselineInitialized,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

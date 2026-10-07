@@ -1,3 +1,5 @@
+pub mod anomaly;
+pub mod baseline;
 pub mod config;
 pub mod detection;
 pub mod event;

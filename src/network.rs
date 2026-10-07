@@ -33,9 +33,51 @@ impl Hash for SocketInfo {
     }
 }
 
+/// A change of the process that owns a listening socket.
+#[derive(Debug, Clone)]
+pub struct SocketOwnerChange {
+    pub previous: Option<ProcessInfo>,
+    pub current: Option<ProcessInfo>,
+    pub socket: SocketInfo,
+}
+
+/// Runtime socket state: identity plus the owner observed at the last scan.
+///
+/// Equality and hashing deliberately delegate to [`SocketInfo`], so a socket
+/// whose owner metadata changes is still the same socket. Owner changes are
+/// compared separately via [`SocketState::owner_changes`].
+#[derive(Debug, Clone)]
+struct SocketRuntimeState {
+    socket: SocketInfo,
+    owner: Option<ProcessInfo>,
+}
+
+impl PartialEq for SocketRuntimeState {
+    fn eq(&self, other: &Self) -> bool {
+        self.socket == other.socket
+    }
+}
+
+impl Eq for SocketRuntimeState {}
+
+impl Hash for SocketRuntimeState {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.socket.hash(state);
+    }
+}
+
+impl SocketRuntimeState {
+    fn from_socket(socket: &SocketInfo) -> Self {
+        Self {
+            socket: socket.clone(),
+            owner: socket.process.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SocketState {
-    seen: HashSet<SocketInfo>,
+    known: HashSet<SocketRuntimeState>,
 }
 
 impl SocketState {
@@ -44,14 +86,47 @@ impl SocketState {
     }
 
     pub fn new_sockets(&mut self, sockets: &[SocketInfo]) -> Vec<SocketInfo> {
-        let current: HashSet<SocketInfo> = sockets.iter().cloned().collect();
         let fresh = sockets
             .iter()
-            .filter(|socket| !self.seen.contains(*socket))
+            .filter(|socket| {
+                !self
+                    .known
+                    .contains(&SocketRuntimeState::from_socket(socket))
+            })
             .cloned()
             .collect();
-        self.seen = current;
+        self.known = sockets
+            .iter()
+            .map(SocketRuntimeState::from_socket)
+            .collect();
         fresh
+    }
+
+    /// Compare socket owners in `sockets` against the owners observed at the
+    /// previous scan. Call this before `new_sockets`, which replaces the stored
+    /// owner metadata.
+    pub fn owner_changes(&self, sockets: &[SocketInfo]) -> Vec<SocketOwnerChange> {
+        let mut changes = Vec::new();
+
+        for socket in sockets {
+            let key = SocketRuntimeState::from_socket(socket);
+            let Some(previous_state) = self.known.get(&key) else {
+                continue;
+            };
+
+            let current = socket.process.clone();
+            if previous_state.owner == current {
+                continue;
+            }
+
+            changes.push(SocketOwnerChange {
+                previous: previous_state.owner.clone(),
+                current,
+                socket: socket.clone(),
+            });
+        }
+
+        changes
     }
 }
 
@@ -275,7 +350,7 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_proc_net_sockets, socket_inode_from_link_target};
+    use super::{parse_proc_net_sockets, socket_inode_from_link_target, SocketInfo, SocketState};
     use crate::process::ProcessInfo;
     use std::collections::HashMap;
 
@@ -330,5 +405,40 @@ mod tests {
         assert_eq!(sockets.len(), 1);
         assert_eq!(sockets[0].local_address, "127.0.0.1");
         assert_eq!(sockets[0].local_port, 53);
+    }
+
+    #[test]
+    fn detects_listener_owner_change_without_new_socket_event() {
+        let old_owner = ProcessInfo {
+            pid: 1,
+            name: Some("old".into()),
+            exe: Some("/usr/bin/old".into()),
+            cmdline: None,
+            uid: Some(1000),
+        };
+        let new_owner = ProcessInfo {
+            pid: 2,
+            name: Some("new".into()),
+            exe: Some("/usr/bin/new".into()),
+            cmdline: None,
+            uid: Some(1000),
+        };
+        let socket = |process| SocketInfo {
+            protocol: "tcp".into(),
+            local_address: "127.0.0.1".into(),
+            local_port: 8080,
+            inode: Some(123),
+            process,
+        };
+        let mut state = SocketState::new();
+
+        assert!(state.new_sockets(&[socket(Some(old_owner.clone()))]).len() == 1);
+        let changed = socket(Some(new_owner.clone()));
+        let changes = state.owner_changes(&[changed.clone()]);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].previous, Some(old_owner));
+        assert_eq!(changes[0].current, Some(new_owner));
+        assert!(state.new_sockets(&[changed]).is_empty());
     }
 }

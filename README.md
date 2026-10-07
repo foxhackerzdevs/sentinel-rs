@@ -17,6 +17,13 @@ It does not kill processes, block network connections, quarantine files, change 
   - Process-to-socket attribution by matching `/proc/<pid>/fd` socket inodes to `/proc/net/tcp` and `/proc/net/tcp6`
   - Owner context on attributed socket events: PID, process name, executable path, UID, and optional command line
   - High-severity hints for public root listeners, temporary-path executables that listen, and deleted executables that listen
+- Persistent baseline and anomaly detection
+  - JSON baseline initialized from the first monitoring snapshot
+  - First-seen process and listening-socket detection
+  - Listening-socket owner-change detection
+  - Exact executable and listener-port allowlists
+  - Automatic learning of newly observed identities
+  - Safe baseline persistence through temporary-file replacement
 - Filesystem monitoring
   - Watches configured paths with the Rust `notify` crate
   - Emits create, modify, remove, and other filesystem events
@@ -31,6 +38,22 @@ It does not kill processes, block network connections, quarantine files, change 
   - `once` for a single snapshot
   - `validate-config`
   - `default-config`
+
+## Baseline monitoring
+
+Continuous `run` monitoring can compare process and listening-socket metadata
+against a persistent JSON baseline. The baseline is initialized from the first
+host snapshot, so existing processes and listeners do not generate a burst of
+first-seen alerts. Later observations produce structured anomaly events for
+new identities and listener owner changes.
+
+Persistent process identity uses executable path, UID, and name rather than PID.
+Persistent listener identity uses protocol, local address, local port, and
+owner metadata rather than socket inode alone. Runtime socket tracking remains
+independent of owner metadata so ownership changes can be detected reliably.
+
+The baseline is only used by `run`. The `once` command remains a stateless
+telemetry snapshot and does not modify the baseline.
 
 ## Requirements
 
@@ -108,7 +131,23 @@ recursive = false
 [logging]
 level = "info"
 json = false
+
+[baseline]
+enabled = true
+path = "state/baseline.json"
+initialize_on_first_run = true
+learn_new = true
+
+[baseline.allowlist]
+process_executables = ["/usr/bin/systemd", "/usr/sbin/sshd"]
+listener_executables = ["/usr/sbin/sshd"]
+listener_ports = [22]
 ```
+
+Allowlist matching is exact; regular expressions and glob patterns are not
+supported. Baseline corruption is reported as an error rather than silently
+overwritten. If baseline persistence fails during monitoring, telemetry
+continues and the failure is logged.
 
 ## Permissions
 
@@ -137,6 +176,8 @@ sentinel-rs/
 ├── config/
 │   └── sentinel.toml
 ├── src/
+│   ├── anomaly.rs
+│   ├── baseline.rs
 │   ├── config.rs
 │   ├── detection.rs
 │   ├── event.rs
@@ -154,7 +195,6 @@ sentinel-rs/
 
 ## Next Phase Ideas
 
-- Baseline and allowlist configuration
 - Persisted event logs with rotation
 - More robust detection rules
 - Optional REST or terminal dashboard

@@ -1,6 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sentinel_rs::{
+    anomaly::{
+        detect_new_listeners, detect_new_processes, event_for_baseline_initialized,
+        event_for_first_seen_listener, event_for_first_seen_process,
+        event_for_listener_owner_change,
+    },
+    baseline::BaselineStore,
     config::SentinelConfig,
     detection::{event_for_process, event_for_socket},
     event::{EventKind, SecurityEvent, Severity},
@@ -102,6 +108,12 @@ fn run(config: SentinelConfig) -> Result<()> {
 
     let mut process_state = ProcessState::new();
     let mut socket_state = SocketState::new();
+
+    let mut baseline = config
+        .baseline
+        .enabled
+        .then(|| BaselineStore::load(&config.baseline.path))
+        .transpose()?;
     let interval = Duration::from_secs(config.telemetry.interval_seconds.max(1));
 
     print_event(&SecurityEvent::new(
@@ -112,7 +124,12 @@ fn run(config: SentinelConfig) -> Result<()> {
     ))?;
 
     while running.load(Ordering::SeqCst) {
-        for event in collect_stateful(&config, &mut process_state, &mut socket_state)? {
+        for event in collect_stateful(
+            &config,
+            &mut process_state,
+            &mut socket_state,
+            baseline.as_mut(),
+        )? {
             print_event(&event)?;
         }
 
@@ -140,7 +157,17 @@ fn collect_once(config: &SentinelConfig, stateful: bool) -> Result<Vec<SecurityE
     let mut socket_state = SocketState::new();
 
     if stateful {
-        collect_stateful(config, &mut process_state, &mut socket_state)
+        let mut baseline = config
+            .baseline
+            .enabled
+            .then(|| BaselineStore::load(&config.baseline.path))
+            .transpose()?;
+        collect_stateful(
+            config,
+            &mut process_state,
+            &mut socket_state,
+            baseline.as_mut(),
+        )
     } else {
         let mut events = Vec::new();
 
@@ -167,23 +194,78 @@ fn collect_stateful(
     config: &SentinelConfig,
     process_state: &mut ProcessState,
     socket_state: &mut SocketState,
+    baseline: Option<&mut BaselineStore>,
 ) -> Result<Vec<SecurityEvent>> {
     let mut events = Vec::new();
+    let processes = config
+        .process
+        .enabled
+        .then(|| collect_processes(config.process.include_command_line))
+        .transpose()?;
+    let sockets = config
+        .network
+        .enabled
+        .then(|| {
+            collect_listening_sockets(
+                config.network.include_udp,
+                config.process.include_command_line,
+            )
+        })
+        .transpose()?;
 
-    if config.process.enabled {
-        let processes = collect_processes(config.process.include_command_line)?;
-        for process in process_state.new_processes(&processes) {
+    if let Some(processes) = processes.as_ref() {
+        for process in process_state.new_processes(processes) {
             events.push(event_for_process(&process, EventKind::ProcessStart));
         }
     }
 
-    if config.network.enabled {
-        let sockets = collect_listening_sockets(
-            config.network.include_udp,
-            config.process.include_command_line,
-        )?;
-        for socket in socket_state.new_sockets(&sockets) {
+    if let Some(sockets) = sockets.as_ref() {
+        let owner_changes = socket_state.owner_changes(sockets);
+        for socket in socket_state.new_sockets(sockets) {
             events.push(event_for_socket(&socket));
+        }
+
+        for change in owner_changes {
+            events.push(event_for_listener_owner_change(&change));
+        }
+    }
+
+    if let Some(baseline) = baseline {
+        if let (Some(processes), Some(sockets)) = (processes.as_ref(), sockets.as_ref()) {
+            if baseline.is_empty() && config.baseline.initialize_on_first_run {
+                baseline.initialize_from_snapshot(processes, sockets);
+                if let Err(error) = baseline.save() {
+                    warn!(%error, path = %baseline.path().display(), "failed to persist baseline");
+                }
+                events.push(event_for_baseline_initialized(
+                    baseline.process_count(),
+                    baseline.listener_count(),
+                ));
+                return Ok(events);
+            }
+
+            let new_processes =
+                detect_new_processes(processes, baseline, &config.baseline.allowlist);
+            for process in new_processes {
+                events.push(event_for_first_seen_process(&process));
+                if config.baseline.learn_new {
+                    baseline.add_process(&process);
+                }
+            }
+
+            let new_listeners = detect_new_listeners(sockets, baseline, &config.baseline.allowlist);
+            for socket in new_listeners {
+                events.push(event_for_first_seen_listener(&socket));
+                if config.baseline.learn_new {
+                    baseline.add_listener(&socket);
+                }
+            }
+
+            if config.baseline.learn_new && (!baseline.is_empty()) {
+                if let Err(error) = baseline.save() {
+                    warn!(%error, path = %baseline.path().display(), "failed to persist baseline");
+                }
+            }
         }
     }
 

@@ -14,6 +14,8 @@ pub struct SentinelConfig {
     pub filesystem: FilesystemConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub baseline: BaselineConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,32 @@ pub struct LoggingConfig {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineConfig {
+    pub enabled: bool,
+
+    pub path: String,
+
+    pub initialize_on_first_run: bool,
+
+    pub learn_new: bool,
+
+    #[serde(default)]
+    pub allowlist: BaselineAllowlistConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BaselineAllowlistConfig {
+    #[serde(default)]
+    pub process_executables: Vec<String>,
+
+    #[serde(default)]
+    pub listener_executables: Vec<String>,
+
+    #[serde(default)]
+    pub listener_ports: Vec<u16>,
+}
+
 impl Default for SentinelConfig {
     fn default() -> Self {
         Self {
@@ -54,6 +82,7 @@ impl Default for SentinelConfig {
             network: NetworkConfig::default(),
             filesystem: FilesystemConfig::default(),
             logging: LoggingConfig::default(),
+            baseline: BaselineConfig::default(),
         }
     }
 }
@@ -99,6 +128,18 @@ impl Default for LoggingConfig {
         Self {
             level: "info".into(),
             json: false,
+        }
+    }
+}
+
+impl Default for BaselineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "state/baseline.json".into(),
+            initialize_on_first_run: true,
+            learn_new: true,
+            allowlist: BaselineAllowlistConfig::default(),
         }
     }
 }
