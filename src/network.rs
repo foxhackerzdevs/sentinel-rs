@@ -15,6 +15,17 @@ pub struct SocketInfo {
     pub process: Option<ProcessInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionInfo {
+    pub protocol: String,
+    pub local_address: String,
+    pub local_port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
+    pub inode: Option<u64>,
+    pub process: Option<ProcessInfo>,
+}
+
 impl PartialEq for SocketInfo {
     fn eq(&self, other: &Self) -> bool {
         self.protocol == other.protocol
@@ -138,6 +149,22 @@ pub fn collect_listening_sockets(
     linux::collect_listening_sockets(include_udp, include_command_line)
 }
 
+#[cfg(target_os = "linux")]
+pub fn collect_connections(
+    include_udp: bool,
+    include_command_line: bool,
+) -> Result<Vec<ConnectionInfo>> {
+    linux::collect_connections(include_udp, include_command_line)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn collect_connections(
+    _include_udp: bool,
+    _include_command_line: bool,
+) -> Result<Vec<ConnectionInfo>> {
+    Ok(Vec::new())
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn collect_listening_sockets(
     _include_udp: bool,
@@ -179,6 +206,37 @@ pub fn parse_proc_net_sockets(
     }
 
     sockets
+}
+
+pub fn parse_proc_net_connections(
+    raw: &str,
+    protocol: &str,
+    owners: &HashMap<u64, ProcessInfo>,
+) -> Vec<ConnectionInfo> {
+    raw.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 10 || fields[3] == "0A" {
+                return None;
+            }
+            let (local_address, local_port) = parse_address(fields[1], protocol.ends_with('6'))?;
+            let (remote_address, remote_port) = parse_address(fields[2], protocol.ends_with('6'))?;
+            if remote_address == "0.0.0.0" || remote_address == "::" || remote_port == 0 {
+                return None;
+            }
+            let inode = fields[9].parse::<u64>().ok();
+            Some(ConnectionInfo {
+                protocol: protocol.to_string(),
+                local_address,
+                local_port,
+                remote_address,
+                remote_port,
+                inode,
+                process: inode.and_then(|inode| owners.get(&inode).cloned()),
+            })
+        })
+        .collect()
 }
 
 pub fn socket_inode_from_link_target(value: &str) -> Option<u64> {
@@ -232,7 +290,10 @@ fn parse_ipv6(value: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{parse_proc_net_sockets, socket_inode_from_link_target, SocketInfo};
+    use super::{
+        parse_proc_net_connections, parse_proc_net_sockets, socket_inode_from_link_target,
+        ConnectionInfo, SocketInfo,
+    };
     use crate::process::read_process_from_proc_dir;
     use anyhow::{Context, Result};
     use std::{
@@ -246,6 +307,37 @@ mod linux {
         include_command_line: bool,
     ) -> Result<Vec<SocketInfo>> {
         collect_listening_sockets_from_proc(Path::new("/proc"), include_udp, include_command_line)
+    }
+
+    pub fn collect_connections(
+        include_udp: bool,
+        include_command_line: bool,
+    ) -> Result<Vec<ConnectionInfo>> {
+        let proc_root = Path::new("/proc");
+        let owners = collect_socket_owners(proc_root, include_command_line)?;
+        let mut connections = Vec::new();
+        collect_connections_from_file(proc_root.join("net/tcp"), "tcp", &owners, &mut connections)?;
+        collect_connections_from_file(
+            proc_root.join("net/tcp6"),
+            "tcp6",
+            &owners,
+            &mut connections,
+        )?;
+        if include_udp {
+            collect_connections_from_file(
+                proc_root.join("net/udp"),
+                "udp",
+                &owners,
+                &mut connections,
+            )?;
+            collect_connections_from_file(
+                proc_root.join("net/udp6"),
+                "udp6",
+                &owners,
+                &mut connections,
+            )?;
+        }
+        Ok(connections)
     }
 
     fn collect_listening_sockets_from_proc(
@@ -346,11 +438,26 @@ mod linux {
 
         Ok(())
     }
+
+    fn collect_connections_from_file(
+        path: PathBuf,
+        protocol: &str,
+        owners: &HashMap<u64, crate::process::ProcessInfo>,
+        connections: &mut Vec<ConnectionInfo>,
+    ) -> Result<()> {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        connections.extend(parse_proc_net_connections(&raw, protocol, owners));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_proc_net_sockets, socket_inode_from_link_target, SocketInfo, SocketState};
+    use super::{
+        parse_proc_net_connections, parse_proc_net_sockets, socket_inode_from_link_target,
+        SocketInfo, SocketState,
+    };
     use crate::process::ProcessInfo;
     use std::collections::HashMap;
 
@@ -440,5 +547,33 @@ mod tests {
         assert_eq!(changes[0].previous, Some(old_owner));
         assert_eq!(changes[0].current, Some(new_owner));
         assert!(state.new_sockets(&[changed]).is_empty());
+    }
+
+    #[test]
+    fn parses_established_connection_and_attaches_owner() {
+        let mut owners = HashMap::new();
+        owners.insert(
+            7777,
+            ProcessInfo {
+                pid: 42,
+                name: Some("curl".into()),
+                exe: Some("/usr/bin/curl".into()),
+                cmdline: None,
+                uid: Some(1000),
+            },
+        );
+        let raw = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:C350 2A000001:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 7777 1 0000000000000000
+";
+        let connections = parse_proc_net_connections(&raw, "tcp", &owners);
+
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].remote_address, "1.0.0.42");
+        assert_eq!(connections[0].remote_port, 443);
+        assert_eq!(
+            connections[0].process.as_ref().map(|process| process.pid),
+            Some(42)
+        );
     }
 }

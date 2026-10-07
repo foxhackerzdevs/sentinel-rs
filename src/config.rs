@@ -16,6 +16,8 @@ pub struct SentinelConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub baseline: BaselineConfig,
+    #[serde(default)]
+    pub behavior: BehaviorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,27 @@ pub struct BaselineAllowlistConfig {
     pub listener_ports: Vec<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BehaviorConfig {
+    pub enabled: bool,
+    pub learn_new: bool,
+    pub track_outbound: bool,
+    pub track_remote_endpoints: bool,
+    pub track_remote_ports: bool,
+    #[serde(default)]
+    pub allowlist: BehaviorAllowlistConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BehaviorAllowlistConfig {
+    #[serde(default)]
+    pub remote_addresses: Vec<String>,
+    #[serde(default)]
+    pub remote_ports: Vec<u16>,
+    #[serde(default)]
+    pub process_executables: Vec<String>,
+}
+
 impl Default for SentinelConfig {
     fn default() -> Self {
         Self {
@@ -83,6 +106,7 @@ impl Default for SentinelConfig {
             filesystem: FilesystemConfig::default(),
             logging: LoggingConfig::default(),
             baseline: BaselineConfig::default(),
+            behavior: BehaviorConfig::default(),
         }
     }
 }
@@ -140,6 +164,19 @@ impl Default for BaselineConfig {
             initialize_on_first_run: true,
             learn_new: true,
             allowlist: BaselineAllowlistConfig::default(),
+        }
+    }
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            learn_new: true,
+            track_outbound: true,
+            track_remote_endpoints: true,
+            track_remote_ports: true,
+            allowlist: BehaviorAllowlistConfig::default(),
         }
     }
 }

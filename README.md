@@ -24,6 +24,12 @@ It does not kill processes, block network connections, quarantine files, change 
   - Exact executable and listener-port allowlists
   - Automatic learning of newly observed identities
   - Safe baseline persistence through temporary-file replacement
+- Process-network behavioral correlation
+  - Outbound TCP and UDP connection tracking
+  - Process attribution through socket inodes
+  - Persistent per-process remote endpoint behavior
+  - First-seen connection and behavior-change events
+  - Exact remote-address, remote-port, and executable allowlists
 - Filesystem monitoring
   - Watches configured paths with the Rust `notify` crate
   - Emits create, modify, remove, and other filesystem events
@@ -54,6 +60,12 @@ independent of owner metadata so ownership changes can be detected reliably.
 
 The baseline is only used by `run`. The `once` command remains a stateless
 telemetry snapshot and does not modify the baseline.
+
+Behavioral monitoring stores compact process-network identities rather than
+every connection occurrence. Repeated observations of a learned connection do
+not produce repeated anomaly events. Behavioral monitoring remains
+detection-only and does not classify endpoints as malicious or take response
+actions.
 
 ## Requirements
 
@@ -142,6 +154,18 @@ learn_new = true
 process_executables = ["/usr/bin/systemd", "/usr/sbin/sshd"]
 listener_executables = ["/usr/sbin/sshd"]
 listener_ports = [22]
+
+[behavior]
+enabled = true
+learn_new = true
+track_outbound = true
+track_remote_endpoints = true
+track_remote_ports = true
+
+[behavior.allowlist]
+remote_addresses = []
+remote_ports = []
+process_executables = []
 ```
 
 Allowlist matching is exact; regular expressions and glob patterns are not
@@ -168,6 +192,7 @@ If a configured filesystem watch path cannot be opened, `sentinel-rs` logs that 
 - Network process attribution is inode-based and reflects what `/proc` exposes at collection time. Very short-lived processes or restricted `/proc` entries may be unattributed.
 - Filesystem event behavior can vary by kernel, filesystem, and watcher backend.
 - Linux `/proc` parsing is intentionally minimal and may be expanded in later phases.
+- Outbound connection visibility and process attribution depend on access to `/proc/net` and `/proc/<pid>/fd`.
 
 ## Repository Layout
 
@@ -178,6 +203,7 @@ sentinel-rs/
 ├── src/
 │   ├── anomaly.rs
 │   ├── baseline.rs
+│   ├── behavior.rs
 │   ├── config.rs
 │   ├── detection.rs
 │   ├── event.rs

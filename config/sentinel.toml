@@ -17,3 +17,16 @@ recursive = false
 [logging]
 level = "info"
 json = false
+
+[baseline]
+enabled = true
+path = "state/baseline.json"
+initialize_on_first_run = true
+learn_new = true
+
+[behavior]
+enabled = true
+learn_new = true
+track_outbound = true
+track_remote_endpoints = true
+track_remote_ports = true

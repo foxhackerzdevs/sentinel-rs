@@ -27,6 +27,10 @@ pub enum EventKind {
     FirstSeenListener,
     ListenerOwnerChanged,
     BaselineInitialized,
+    FirstSeenConnection,
+    NewRemoteEndpoint,
+    NewRemotePort,
+    ProcessNetworkBehaviorChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

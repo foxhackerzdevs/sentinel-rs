@@ -5,6 +5,9 @@ use crate::{
     network::SocketInfo,
     process::ProcessInfo,
 };
+use crate::{
+    behavior::detect_new_connections, config::BehaviorAllowlistConfig, network::ConnectionInfo,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketOwner {
@@ -175,6 +178,42 @@ pub fn event_for_baseline_initialized(
     )
     .with_detail("process_count", process_count)
     .with_detail("listener_count", listener_count)
+}
+
+pub fn event_for_first_seen_connection(connection: &ConnectionInfo) -> SecurityEvent {
+    let process = connection.process.as_ref();
+    SecurityEvent::new(
+        EventKind::FirstSeenConnection,
+        Severity::Medium,
+        "behavior",
+        format!(
+            "process network behavior changed: {} -> {}:{}",
+            process
+                .and_then(|process| process.name.as_deref())
+                .unwrap_or("unknown"),
+            connection.remote_address,
+            connection.remote_port
+        ),
+    )
+    .with_detail("protocol", &connection.protocol)
+    .with_detail("remote_address", &connection.remote_address)
+    .with_detail("remote_port", connection.remote_port)
+    .with_detail("local_address", &connection.local_address)
+    .with_detail("local_port", connection.local_port)
+    .with_detail("pid", process.map(|process| process.pid))
+    .with_detail(
+        "process_exe",
+        process.and_then(|process| process.exe.as_deref()),
+    )
+    .with_detail("process_uid", process.and_then(|process| process.uid))
+}
+
+pub fn detect_new_network_behavior(
+    connections: &[ConnectionInfo],
+    baseline: &BaselineStore,
+    allowlist: &BehaviorAllowlistConfig,
+) -> Vec<ConnectionInfo> {
+    detect_new_connections(connections, baseline, allowlist)
 }
 
 pub fn allowlisted_process(process: &ProcessInfo, allowlist: &BaselineAllowlistConfig) -> bool {

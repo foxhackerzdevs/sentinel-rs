@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use sentinel_rs::{
     anomaly::{
         detect_new_listeners, detect_new_processes, event_for_baseline_initialized,
-        event_for_first_seen_listener, event_for_first_seen_process,
-        event_for_listener_owner_change,
+        event_for_first_seen_connection, event_for_first_seen_listener,
+        event_for_first_seen_process, event_for_listener_owner_change,
     },
     baseline::BaselineStore,
     config::SentinelConfig,
@@ -12,7 +12,7 @@ use sentinel_rs::{
     event::{EventKind, SecurityEvent, Severity},
     filesystem::FilesystemMonitor,
     logger,
-    network::{collect_listening_sockets, SocketState},
+    network::{collect_connections, collect_listening_sockets, SocketState},
     process::{collect_processes, ProcessState},
 };
 use std::{
@@ -212,6 +212,14 @@ fn collect_stateful(
             )
         })
         .transpose()?;
+    let connections = (config.behavior.enabled && config.behavior.track_outbound)
+        .then(|| {
+            collect_connections(
+                config.network.include_udp,
+                config.process.include_command_line,
+            )
+        })
+        .transpose()?;
 
     if let Some(processes) = processes.as_ref() {
         for process in process_state.new_processes(processes) {
@@ -234,6 +242,9 @@ fn collect_stateful(
         if let (Some(processes), Some(sockets)) = (processes.as_ref(), sockets.as_ref()) {
             if baseline.is_empty() && config.baseline.initialize_on_first_run {
                 baseline.initialize_from_snapshot(processes, sockets);
+                if let Some(connections) = connections.as_ref() {
+                    baseline.initialize_connections(connections);
+                }
                 if let Err(error) = baseline.save() {
                     warn!(%error, path = %baseline.path().display(), "failed to persist baseline");
                 }
@@ -258,6 +269,20 @@ fn collect_stateful(
                 events.push(event_for_first_seen_listener(&socket));
                 if config.baseline.learn_new {
                     baseline.add_listener(&socket);
+                }
+
+                if let Some(connections) = connections.as_ref() {
+                    let new_connections = sentinel_rs::anomaly::detect_new_network_behavior(
+                        connections,
+                        baseline,
+                        &config.behavior.allowlist,
+                    );
+                    for connection in new_connections {
+                        events.push(event_for_first_seen_connection(&connection));
+                        if config.behavior.learn_new {
+                            baseline.add_connection(&connection);
+                        }
+                    }
                 }
             }
 

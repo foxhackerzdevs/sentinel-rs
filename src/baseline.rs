@@ -1,5 +1,8 @@
 pub use crate::config::{BaselineAllowlistConfig, BaselineConfig};
-use crate::{network::SocketInfo, process::ProcessInfo};
+use crate::{
+    network::{ConnectionInfo, SocketInfo},
+    process::ProcessInfo,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const BASELINE_VERSION: u32 = 1;
+const BASELINE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Baseline {
@@ -20,6 +23,9 @@ pub struct Baseline {
 
     #[serde(default)]
     pub listeners: BTreeSet<ListenerBaselineKey>,
+
+    #[serde(default)]
+    pub connections: BTreeSet<ProcessNetworkBaselineKey>,
 }
 
 impl Baseline {
@@ -45,6 +51,16 @@ pub struct ListenerBaselineKey {
     pub local_port: u16,
     pub executable: Option<String>,
     pub uid: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProcessNetworkBaselineKey {
+    pub executable: Option<String>,
+    pub uid: Option<u32>,
+    pub name: Option<String>,
+    pub protocol: String,
+    pub remote_address: String,
+    pub remote_port: u16,
 }
 
 /// Persistent host baseline state.
@@ -90,7 +106,9 @@ impl BaselineStore {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.baseline.processes.is_empty() && self.baseline.listeners.is_empty()
+        self.baseline.processes.is_empty()
+            && self.baseline.listeners.is_empty()
+            && self.baseline.connections.is_empty()
     }
 
     pub fn contains_process(&self, process: &ProcessInfo) -> bool {
@@ -109,12 +127,28 @@ impl BaselineStore {
         self.baseline.listeners.insert(listener_key(socket));
     }
 
+    pub fn contains_connection(&self, connection: &ConnectionInfo) -> bool {
+        self.baseline
+            .connections
+            .contains(&crate::behavior::connection_key(connection))
+    }
+
+    pub fn add_connection(&mut self, connection: &ConnectionInfo) {
+        self.baseline
+            .connections
+            .insert(crate::behavior::connection_key(connection));
+    }
+
     pub fn process_count(&self) -> usize {
         self.baseline.processes.len()
     }
 
     pub fn listener_count(&self) -> usize {
         self.baseline.listeners.len()
+    }
+
+    pub fn connection_count(&self) -> usize {
+        self.baseline.connections.len()
     }
 
     pub fn initialize_from_snapshot(&mut self, processes: &[ProcessInfo], sockets: &[SocketInfo]) {
@@ -124,6 +158,12 @@ impl BaselineStore {
         }
         for socket in sockets {
             self.add_listener(socket);
+        }
+    }
+
+    pub fn initialize_connections(&mut self, connections: &[ConnectionInfo]) {
+        for connection in connections {
+            self.add_connection(connection);
         }
     }
 
@@ -239,7 +279,7 @@ mod tests {
         let json = serde_json::to_string(&store.baseline).unwrap();
         let restored: super::Baseline = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(restored.version, 1);
+        assert_eq!(restored.version, 2);
         assert_eq!(restored.processes.len(), 1);
         assert_eq!(restored.listeners.len(), 1);
         assert!(restored.processes.contains(&ProcessBaselineKey {

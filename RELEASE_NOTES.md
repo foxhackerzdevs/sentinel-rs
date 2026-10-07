@@ -1,5 +1,33 @@
 # Release Notes
 
+## v0.4.0 - Process-Network Behavioral Correlation
+
+This release adds compact, stateful behavioral correlation between processes
+and outbound network connections.
+
+### Added
+
+- Outbound TCP and UDP connection tracking from `/proc/net`.
+- Process attribution through `/proc/<pid>/fd` socket inodes.
+- Persistent process-network behavior identities in the JSON baseline.
+- First-seen connection and process-network behavior events.
+- Exact remote-address, remote-port, and process executable allowlists.
+- Deduplication through baseline learning of observed behavior.
+- Synthetic `/proc/net` connection parser tests.
+
+### Safety
+
+Behavioral detection remains read-only and detection-only. It does not block
+connections, modify firewall rules, terminate processes, or call reputation
+services.
+
+### Limitations
+
+- Connection visibility depends on `/proc` permissions and polling intervals.
+- The baseline stores compact identities, not historical connection events.
+- Allowlist matching is exact; regular expressions and glob patterns are not
+  supported.
+
 ## v0.3.0 - Phase 3 Baseline & Anomaly Detection
 
 This release adds persistent host baselining and stateful anomaly detection to
