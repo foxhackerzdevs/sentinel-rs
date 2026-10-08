@@ -30,3 +30,7 @@ learn_new = true
 track_outbound = true
 track_remote_endpoints = true
 track_remote_ports = true
+
+[correlation]
+enabled = true
+window_seconds = 300

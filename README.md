@@ -30,6 +30,10 @@ It does not kill processes, block network connections, quarantine files, change 
   - Persistent per-process remote endpoint behavior
   - First-seen connection and behavior-change events
   - Exact remote-address, remote-port, and executable allowlists
+- Cross-domain security correlation
+  - Correlates filesystem, process, and network activity within a bounded window
+  - Emits deduplicated structured correlated-activity events
+  - Uses deterministic correlation IDs for repeated sequence suppression
 - Filesystem monitoring
   - Watches configured paths with the Rust `notify` crate
   - Emits create, modify, remove, and other filesystem events
@@ -66,6 +70,12 @@ every connection occurrence. Repeated observations of a learned connection do
 not produce repeated anomaly events. Behavioral monitoring remains
 detection-only and does not classify endpoints as malicious or take response
 actions.
+
+Cross-domain correlation detects suspicious sequences of legitimate
+observations, such as a file being created, then executed, then opening a
+listener or making an outbound connection. It does not label activity as
+malware and does not take response actions. Correlation is enabled for
+continuous `run` monitoring and is bounded by the configured time window.
 
 ## Requirements
 
@@ -166,6 +176,10 @@ track_remote_ports = true
 remote_addresses = []
 remote_ports = []
 process_executables = []
+
+[correlation]
+enabled = true
+window_seconds = 300
 ```
 
 Allowlist matching is exact; regular expressions and glob patterns are not
@@ -204,6 +218,7 @@ sentinel-rs/
 │   ├── anomaly.rs
 │   ├── baseline.rs
 │   ├── behavior.rs
+│   ├── correlation.rs
 │   ├── config.rs
 │   ├── detection.rs
 │   ├── event.rs

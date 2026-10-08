@@ -2,6 +2,7 @@ pub mod anomaly;
 pub mod baseline;
 pub mod behavior;
 pub mod config;
+pub mod correlation;
 pub mod detection;
 pub mod event;
 pub mod filesystem;

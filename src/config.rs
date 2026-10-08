@@ -18,6 +18,8 @@ pub struct SentinelConfig {
     pub baseline: BaselineConfig,
     #[serde(default)]
     pub behavior: BehaviorConfig,
+    #[serde(default)]
+    pub correlation: CorrelationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,12 @@ pub struct BehaviorAllowlistConfig {
     pub process_executables: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationConfig {
+    pub enabled: bool,
+    pub window_seconds: u64,
+}
+
 impl Default for SentinelConfig {
     fn default() -> Self {
         Self {
@@ -107,6 +115,7 @@ impl Default for SentinelConfig {
             logging: LoggingConfig::default(),
             baseline: BaselineConfig::default(),
             behavior: BehaviorConfig::default(),
+            correlation: CorrelationConfig::default(),
         }
     }
 }
@@ -177,6 +186,15 @@ impl Default for BehaviorConfig {
             track_remote_endpoints: true,
             track_remote_ports: true,
             allowlist: BehaviorAllowlistConfig::default(),
+        }
+    }
+}
+
+impl Default for CorrelationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_seconds: 300,
         }
     }
 }

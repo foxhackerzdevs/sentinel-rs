@@ -31,6 +31,7 @@ pub enum EventKind {
     NewRemoteEndpoint,
     NewRemotePort,
     ProcessNetworkBehaviorChanged,
+    CorrelatedActivity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

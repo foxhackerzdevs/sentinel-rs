@@ -1,5 +1,33 @@
 # Release Notes
 
+## v0.5.0 - Cross-Domain Security Correlation
+
+This release adds bounded, stateful correlation across filesystem, process,
+and network observations while preserving sentinel-rs's read-only model.
+
+### Added
+
+- Configurable correlation windows.
+- Filesystem, process, and network sequence correlation.
+- Structured `correlated_activity` events.
+- Deterministic correlation IDs.
+- Deduplication of repeated activity sequences.
+- Synthetic attack-sequence correlation tests.
+
+### Safety
+
+Correlation identifies suspicious sequences of legitimate observations. It
+does not claim that an individual observation is malware and does not
+terminate processes, modify firewall or routing rules, quarantine files, or
+change permissions.
+
+### Limitations
+
+- Correlation is bounded to the configured in-memory time window.
+- File-to-process matching uses exact executable paths.
+- Correlation depends on `/proc` visibility and filesystem watcher delivery.
+- Historical event storage and analytics remain outside this release.
+
 ## v0.4.0 - Process-Network Behavioral Correlation
 
 This release adds compact, stateful behavioral correlation between processes

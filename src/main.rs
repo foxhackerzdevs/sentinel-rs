@@ -8,6 +8,7 @@ use sentinel_rs::{
     },
     baseline::BaselineStore,
     config::SentinelConfig,
+    correlation::CorrelationState,
     detection::{event_for_process, event_for_socket},
     event::{EventKind, SecurityEvent, Severity},
     filesystem::FilesystemMonitor,
@@ -108,6 +109,9 @@ fn run(config: SentinelConfig) -> Result<()> {
 
     let mut process_state = ProcessState::new();
     let mut socket_state = SocketState::new();
+    let mut correlation_state = CorrelationState::new(Duration::from_secs(
+        config.correlation.window_seconds.max(1),
+    ));
 
     let mut baseline = config
         .baseline
@@ -124,17 +128,29 @@ fn run(config: SentinelConfig) -> Result<()> {
     ))?;
 
     while running.load(Ordering::SeqCst) {
-        for event in collect_stateful(
+        let telemetry_events = collect_stateful(
             &config,
             &mut process_state,
             &mut socket_state,
             baseline.as_mut(),
-        )? {
+        )?;
+        let correlated = if config.correlation.enabled {
+            correlation_state.observe(&telemetry_events)
+        } else {
+            Vec::new()
+        };
+        for event in telemetry_events.into_iter().chain(correlated) {
             print_event(&event)?;
         }
 
         if let Some(monitor) = &filesystem {
-            for event in monitor.drain_events() {
+            let filesystem_events = monitor.drain_events();
+            let correlated = if config.correlation.enabled {
+                correlation_state.observe(&filesystem_events)
+            } else {
+                Vec::new()
+            };
+            for event in filesystem_events.into_iter().chain(correlated) {
                 print_event(&event)?;
             }
         }
