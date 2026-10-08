@@ -29,7 +29,7 @@ impl CorrelationState {
         for event in events {
             self.expire(event.timestamp);
             self.recent.push_back(event.clone());
-            if let Some(correlation) = self.correlate(event) {
+            if let Some(correlation) = self.correlate_window() {
                 correlated.push(correlation);
             }
         }
@@ -46,36 +46,43 @@ impl CorrelationState {
         }
     }
 
-    fn correlate(&mut self, current: &SecurityEvent) -> Option<SecurityEvent> {
-        let executable =
-            detail_string(current, "process_exe").or_else(|| detail_string(current, "exe"))?;
-
-        let file_event = self.recent.iter().find(|event| {
-            matches!(event.kind, EventKind::FileCreated | EventKind::FileModified)
-                && detail_string(event, "path").as_deref() == Some(executable.as_str())
-        })?;
-        let process_event = self.recent.iter().find(|event| {
-            matches!(
-                event.kind,
+    fn correlate_window(&mut self) -> Option<SecurityEvent> {
+        let candidate = self.recent.iter().find_map(|process_event| {
+            let executable = detail_string(process_event, "exe")?;
+            if !matches!(
+                process_event.kind,
                 EventKind::ProcessStart | EventKind::FirstSeenProcess
-            ) && detail_string(event, "exe").as_deref() == Some(executable.as_str())
-        })?;
-        let network_event = self.recent.iter().find(|event| {
-            matches!(
-                event.kind,
-                EventKind::ListeningSocket
-                    | EventKind::FirstSeenListener
-                    | EventKind::FirstSeenConnection
-                    | EventKind::ProcessNetworkBehaviorChanged
-            ) && detail_string(event, "process_exe").as_deref() == Some(executable.as_str())
-        })?;
+            ) {
+                return None;
+            }
 
-        let key = format!(
-            "{}:{}:{}",
-            executable,
-            file_event.kind_as_key(),
-            network_event.kind_as_key()
-        );
+            let file_event = self.recent.iter().find(|event| {
+                matches!(event.kind, EventKind::FileCreated | EventKind::FileModified)
+                    && detail_string(event, "path").as_deref() == Some(executable.as_str())
+            })?;
+            let network_event = self.recent.iter().find(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ListeningSocket
+                        | EventKind::FirstSeenListener
+                        | EventKind::FirstSeenConnection
+                        | EventKind::ProcessNetworkBehaviorChanged
+                ) && detail_string(event, "process_exe").as_deref() == Some(executable.as_str())
+            })?;
+
+            Some((
+                executable,
+                file_event.kind_as_key(),
+                process_event.kind_as_key(),
+                network_event.kind_as_key(),
+                file_event.details.get("path").cloned(),
+                network_event.details.get("remote_address").cloned(),
+                network_event.details.get("remote_port").cloned(),
+            ))
+        })?;
+        let (executable, file_kind, process_kind, network_kind, path, remote_address, remote_port) =
+            candidate;
+        let key = format!("{executable}:{file_kind}:{network_kind}");
         if !self.emitted.insert(key.clone()) {
             return None;
         }
@@ -88,17 +95,17 @@ impl CorrelationState {
         )
         .with_detail("correlation_id", correlation_id(&key))
         .with_detail("executable", &executable)
-        .with_detail("file_event", file_event.kind_as_key())
-        .with_detail("process_event", process_event.kind_as_key())
-        .with_detail("network_event", network_event.kind_as_key());
+        .with_detail("file_event", file_kind)
+        .with_detail("process_event", process_kind)
+        .with_detail("network_event", network_kind);
 
-        if let Some(path) = detail_string(file_event, "path") {
+        if let Some(path) = path {
             event = event.with_detail("path", path);
         }
-        if let Some(remote_address) = detail_string(network_event, "remote_address") {
+        if let Some(remote_address) = remote_address {
             event = event.with_detail("remote_address", remote_address);
         }
-        if let Some(remote_port) = network_event.details.get("remote_port") {
+        if let Some(remote_port) = remote_port {
             event = event.with_detail("remote_port", remote_port);
         }
         Some(event)
@@ -186,6 +193,21 @@ mod tests {
         assert_eq!(correlated[0].kind, EventKind::CorrelatedActivity);
         assert_eq!(correlated[0].severity, Severity::High);
         assert_eq!(correlated[0].details["remote_port"], 4444);
+    }
+
+    #[test]
+    fn correlates_when_filesystem_event_arrives_last() {
+        let mut state = CorrelationState::new(Duration::from_secs(300));
+        let events = [
+            process("/tmp/payload"),
+            network("/tmp/payload"),
+            file("/tmp/payload"),
+        ];
+
+        let correlated = state.observe(&events);
+
+        assert_eq!(correlated.len(), 1);
+        assert_eq!(correlated[0].details["path"], "/tmp/payload");
     }
 
     #[test]

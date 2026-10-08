@@ -286,18 +286,18 @@ fn collect_stateful(
                 if config.baseline.learn_new {
                     baseline.add_listener(&socket);
                 }
+            }
 
-                if let Some(connections) = connections.as_ref() {
-                    let new_connections = sentinel_rs::anomaly::detect_new_network_behavior(
-                        connections,
-                        baseline,
-                        &config.behavior.allowlist,
-                    );
-                    for connection in new_connections {
-                        events.push(event_for_first_seen_connection(&connection));
-                        if config.behavior.learn_new {
-                            baseline.add_connection(&connection);
-                        }
+            if let Some(connections) = connections.as_ref() {
+                let new_connections = sentinel_rs::anomaly::detect_new_network_behavior(
+                    connections,
+                    baseline,
+                    &config.behavior.allowlist,
+                );
+                for connection in new_connections {
+                    events.push(event_for_first_seen_connection(&connection));
+                    if config.behavior.learn_new {
+                        baseline.add_connection(&connection);
                     }
                 }
             }

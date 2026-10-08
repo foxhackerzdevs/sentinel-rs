@@ -78,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_new_connection_and_deduplicates_after_learning() {
+    fn detects_outbound_connection_without_listener_changes() {
         let candidate = connection(443);
         let mut baseline = BaselineStore::empty("baseline.json");
         let allowlist = BehaviorAllowlistConfig::default();
