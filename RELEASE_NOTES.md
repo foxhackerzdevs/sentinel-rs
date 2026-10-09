@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.5.1 - Correlation and Behavior Hardening
+
+This maintenance release hardens the v0.5 behavioral pipeline without adding
+response actions or changing the detection-only model.
+
+### Fixed
+
+- Behavioral anomaly detection no longer depends on persistent baseline
+  storage being enabled.
+- Behavioral detection continues when process or listener snapshots are
+  unavailable.
+- Correlation evaluates the accumulated window for every event ordering.
+- Deleted executable identities are normalized for correlation matching.
+- Correlation events expire outside the configured window.
+
+### Tests
+
+- Runtime behavioral deduplication without a persistent baseline.
+- Deleted executable correlation.
+- Correlation-window expiration.
+- Existing cross-domain ordering and deduplication coverage.
+
 ## v0.5.0 - Cross-Domain Security Correlation
 
 This release adds bounded, stateful correlation across filesystem, process,

@@ -71,6 +71,12 @@ not produce repeated anomaly events. Behavioral monitoring remains
 detection-only and does not classify endpoints as malicious or take response
 actions.
 
+Behavioral detection also works when persistent baseline storage is disabled;
+the current process-network observation state remains in memory for the
+monitoring session. Correlation normalizes deleted executable identities such
+as `/tmp/payload (deleted)` to the original path while retaining raw values in
+the source events.
+
 Cross-domain correlation detects suspicious sequences of legitimate
 observations, such as a file being created, then executed, then opening a
 listener or making an outbound connection. It does not label activity as

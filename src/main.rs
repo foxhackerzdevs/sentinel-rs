@@ -7,6 +7,7 @@ use sentinel_rs::{
         event_for_first_seen_process, event_for_listener_owner_change,
     },
     baseline::BaselineStore,
+    behavior::BehaviorState,
     config::SentinelConfig,
     correlation::CorrelationState,
     detection::{event_for_process, event_for_socket},
@@ -109,6 +110,7 @@ fn run(config: SentinelConfig) -> Result<()> {
 
     let mut process_state = ProcessState::new();
     let mut socket_state = SocketState::new();
+    let mut behavior_state = BehaviorState::new();
     let mut correlation_state = CorrelationState::new(Duration::from_secs(
         config.correlation.window_seconds.max(1),
     ));
@@ -132,6 +134,7 @@ fn run(config: SentinelConfig) -> Result<()> {
             &config,
             &mut process_state,
             &mut socket_state,
+            &mut behavior_state,
             baseline.as_mut(),
         )?;
         let correlated = if config.correlation.enabled {
@@ -171,6 +174,7 @@ fn run(config: SentinelConfig) -> Result<()> {
 fn collect_once(config: &SentinelConfig, stateful: bool) -> Result<Vec<SecurityEvent>> {
     let mut process_state = ProcessState::new();
     let mut socket_state = SocketState::new();
+    let mut behavior_state = BehaviorState::new();
 
     if stateful {
         let mut baseline = config
@@ -182,6 +186,7 @@ fn collect_once(config: &SentinelConfig, stateful: bool) -> Result<Vec<SecurityE
             config,
             &mut process_state,
             &mut socket_state,
+            &mut behavior_state,
             baseline.as_mut(),
         )
     } else {
@@ -210,7 +215,8 @@ fn collect_stateful(
     config: &SentinelConfig,
     process_state: &mut ProcessState,
     socket_state: &mut SocketState,
-    baseline: Option<&mut BaselineStore>,
+    behavior_state: &mut BehaviorState,
+    mut baseline: Option<&mut BaselineStore>,
 ) -> Result<Vec<SecurityEvent>> {
     let mut events = Vec::new();
     let processes = config
@@ -254,7 +260,7 @@ fn collect_stateful(
         }
     }
 
-    if let Some(baseline) = baseline {
+    if let Some(baseline) = baseline.as_mut() {
         if let (Some(processes), Some(sockets)) = (processes.as_ref(), sockets.as_ref()) {
             if baseline.is_empty() && config.baseline.initialize_on_first_run {
                 baseline.initialize_from_snapshot(processes, sockets);
@@ -288,21 +294,40 @@ fn collect_stateful(
                 }
             }
 
-            if let Some(connections) = connections.as_ref() {
-                let new_connections = sentinel_rs::anomaly::detect_new_network_behavior(
-                    connections,
-                    baseline,
-                    &config.behavior.allowlist,
-                );
-                for connection in new_connections {
-                    events.push(event_for_first_seen_connection(&connection));
-                    if config.behavior.learn_new {
-                        baseline.add_connection(&connection);
-                    }
+            if config.baseline.learn_new && (!baseline.is_empty()) {
+                if let Err(error) = baseline.save() {
+                    warn!(%error, path = %baseline.path().display(), "failed to persist baseline");
                 }
             }
+        }
+    }
 
-            if config.baseline.learn_new && (!baseline.is_empty()) {
+    if let Some(connections) = connections.as_ref() {
+        let new_connections = if let Some(baseline) = baseline.as_deref_mut() {
+            sentinel_rs::anomaly::detect_new_network_behavior(
+                connections,
+                baseline,
+                &config.behavior.allowlist,
+            )
+        } else {
+            behavior_state.detect_new(
+                connections,
+                &config.behavior.allowlist,
+                config.behavior.learn_new,
+            )
+        };
+
+        for connection in new_connections {
+            events.push(event_for_first_seen_connection(&connection));
+            if let Some(baseline) = baseline.as_deref_mut() {
+                if config.behavior.learn_new {
+                    baseline.add_connection(&connection);
+                }
+            }
+        }
+
+        if let Some(baseline) = baseline.as_deref_mut() {
+            if config.behavior.learn_new && !baseline.is_empty() {
                 if let Err(error) = baseline.save() {
                     warn!(%error, path = %baseline.path().display(), "failed to persist baseline");
                 }

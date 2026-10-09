@@ -48,7 +48,7 @@ impl CorrelationState {
 
     fn correlate_window(&mut self) -> Option<SecurityEvent> {
         let candidate = self.recent.iter().find_map(|process_event| {
-            let executable = detail_string(process_event, "exe")?;
+            let executable = normalize_process_identity(&detail_string(process_event, "exe")?)?;
             if !matches!(
                 process_event.kind,
                 EventKind::ProcessStart | EventKind::FirstSeenProcess
@@ -58,7 +58,10 @@ impl CorrelationState {
 
             let file_event = self.recent.iter().find(|event| {
                 matches!(event.kind, EventKind::FileCreated | EventKind::FileModified)
-                    && detail_string(event, "path").as_deref() == Some(executable.as_str())
+                    && detail_string(event, "path")
+                        .and_then(|path| normalize_process_identity(&path))
+                        .as_deref()
+                        == Some(executable.as_str())
             })?;
             let network_event = self.recent.iter().find(|event| {
                 matches!(
@@ -67,7 +70,10 @@ impl CorrelationState {
                         | EventKind::FirstSeenListener
                         | EventKind::FirstSeenConnection
                         | EventKind::ProcessNetworkBehaviorChanged
-                ) && detail_string(event, "process_exe").as_deref() == Some(executable.as_str())
+                ) && detail_string(event, "process_exe")
+                    .and_then(|exe| normalize_process_identity(&exe))
+                    .as_deref()
+                    == Some(executable.as_str())
             })?;
 
             Some((
@@ -118,6 +124,12 @@ fn detail_string(event: &SecurityEvent, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn normalize_process_identity(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value.strip_suffix(" (deleted)").unwrap_or(value).trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn correlation_id(key: &str) -> String {
@@ -177,6 +189,31 @@ mod tests {
         .with_detail("process_exe", exe)
         .with_detail("remote_address", "203.0.113.10")
         .with_detail("remote_port", 4444)
+    }
+
+    #[test]
+    fn correlates_deleted_process_with_original_file_path() {
+        let mut state = CorrelationState::new(Duration::from_secs(300));
+        let events = [
+            file("/tmp/payload"),
+            process("/tmp/payload (deleted)"),
+            network("/tmp/payload (deleted)"),
+        ];
+
+        assert_eq!(state.observe(&events).len(), 1);
+    }
+
+    #[test]
+    fn expires_events_outside_the_correlation_window() {
+        use chrono::{Duration as ChronoDuration, Utc};
+
+        let mut state = CorrelationState::new(Duration::from_secs(5));
+        let mut old_file = file("/tmp/payload");
+        old_file.timestamp = Utc::now() - ChronoDuration::seconds(10);
+
+        assert!(state
+            .observe(&[old_file, process("/tmp/payload"), network("/tmp/payload")])
+            .is_empty());
     }
 
     #[test]

@@ -3,6 +3,33 @@ use crate::{
     config::BehaviorAllowlistConfig,
     network::ConnectionInfo,
 };
+use std::collections::BTreeSet;
+
+#[derive(Debug, Default)]
+pub struct BehaviorState {
+    known: BTreeSet<ProcessNetworkBaselineKey>,
+}
+
+impl BehaviorState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn detect_new(
+        &mut self,
+        connections: &[ConnectionInfo],
+        allowlist: &BehaviorAllowlistConfig,
+        learn_new: bool,
+    ) -> Vec<ConnectionInfo> {
+        let new_connections = detect_new_connections_from_keys(connections, &self.known, allowlist);
+        if learn_new {
+            for connection in &new_connections {
+                self.known.insert(connection_key(connection));
+            }
+        }
+        new_connections
+    }
+}
 
 pub fn detect_new_connections(
     connections: &[ConnectionInfo],
@@ -13,6 +40,19 @@ pub fn detect_new_connections(
         .iter()
         .filter(|connection| !allowlisted(connection, allowlist))
         .filter(|connection| !baseline.contains_connection(connection))
+        .cloned()
+        .collect()
+}
+
+fn detect_new_connections_from_keys(
+    connections: &[ConnectionInfo],
+    known: &BTreeSet<ProcessNetworkBaselineKey>,
+    allowlist: &BehaviorAllowlistConfig,
+) -> Vec<ConnectionInfo> {
+    connections
+        .iter()
+        .filter(|connection| !allowlisted(connection, allowlist))
+        .filter(|connection| !known.contains(&connection_key(connection)))
         .cloned()
         .collect()
 }
@@ -104,5 +144,18 @@ mod tests {
             &allowlist,
         )
         .is_empty());
+    }
+
+    #[test]
+    fn runtime_state_deduplicates_without_persistent_baseline() {
+        let candidate = connection(443);
+        let mut state = super::BehaviorState::new();
+        let allowlist = BehaviorAllowlistConfig::default();
+
+        assert_eq!(
+            state.detect_new(&[candidate.clone()], &allowlist, true),
+            vec![candidate.clone()]
+        );
+        assert!(state.detect_new(&[candidate], &allowlist, true).is_empty());
     }
 }
